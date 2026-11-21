@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "scope": "Observed HTTP service behavior",
+  "phase_fields": ["start", "end", "label", "source"],
+  "time_unit": "unix_nanoseconds",
+  "interval": "half_open",
+  "labels": {
+    "foreground_pause": {
+      "channel": "network",
+      "reference": "Expected foreground client demand from an independent source and a pause in foreground traffic",
+      "normal_control": "Confirmed idle time with no expected demand and the same background health traffic"
+    },
+    "large_upload": {
+      "channel": "network",
+      "reference": "Observed off-profile inbound body size with operation context",
+      "normal_control": "A comparable planned upload on the same route and service"
+    },
+    "large_response": {
+      "channel": "network",
+      "reference": "Observed off-profile response body size with operation context",
+      "normal_control": "A comparable scheduled export or download"
+    },
+    "connection_surge": {
+      "channel": "network",
+      "reference": "Off-profile rate of new connections with known demand context",
+      "normal_control": "A legitimate temporary demand peak with comparable traffic volume"
+    },
+    "persistent_exchange": {
+      "channel": "network",
+      "reference": "Off-profile persistent exchange with independently confirmed connection lifetime and operation",
+      "normal_control": "Long-lived planned streaming or connection reuse"
+    },
+    "unknown": {
+      "reference": "Observable abnormal activity outside the known taxonomy, including a confirmed HTTP degradation",
+      "normal_control": "Measured ordinary application performance under the same load"
+    },
+    "normal": {"reference": "Verified expected behavior or planned changes"},
+    "mixed": {"reference": "At least two plausible labels with no unique primary type"},
+    "unobservable": {"reference": "Missing evidence for assigning normal or abnormal"}
+  }
+}

@@ -1,0 +1,341 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "FeatureWindow v1",
+  "required": [
+    "schema_version",
+    "feature_set_version",
+    "event_id",
+    "sensor_id",
+    "capture_epoch",
+    "entity_type",
+    "entity_id",
+    "window_start_ns",
+    "window_end_ns",
+    "features",
+    "quality"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "feature_set_version": {
+      "enum": [
+        "traffic-v1",
+        "traffic-v2"
+      ]
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sensor_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "capture_epoch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "entity_type": {
+      "enum": [
+        "host",
+        "destination_service"
+      ]
+    },
+    "entity_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "window_start_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "window_end_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed_requests", "server_errors", "mean_latency_ms", "planned_activity"],
+      "properties": {
+        "completed_requests": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "server_errors": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "mean_latency_ms": {"type": ["number", "null"], "minimum": 0},
+        "planned_activity": {"type": ["boolean", "null"]},
+        "source_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$"
+        },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["route_id", "method", "completed_requests", "request_body_bytes", "response_body_bytes", "expected_requests"],
+            "properties": {
+              "route_id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+              "method": {"enum": ["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"]},
+              "completed_requests": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+              "request_body_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807},
+              "response_body_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807},
+              "expected_requests": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807}
+            }
+          }
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "in_packets",
+        "out_packets",
+        "in_ip_bytes",
+        "out_ip_bytes",
+        "unique_peers",
+        "unique_destination_ports",
+        "active_flows",
+        "new_tcp_attempts",
+        "established_tcp_attempts",
+        "syn_fraction",
+        "rst_fraction",
+        "mean_packet_size",
+        "std_packet_size",
+        "mean_interarrival_seconds",
+        "std_interarrival_seconds",
+        "completed_flow_count"
+      ],
+      "properties": {
+        "in_packets": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "out_packets": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "in_ip_bytes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "out_ip_bytes": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "unique_peers": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "unique_destination_ports": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "active_flows": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "new_tcp_attempts": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "established_tcp_attempts": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "syn_fraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "rst_fraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "mean_packet_size": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "std_packet_size": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "mean_interarrival_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "std_interarrival_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "completed_flow_count": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tcp_age_mean_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tcp_age_max_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tcp_closed_duration_mean_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tcp_closed_duration_max_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "tcp_age_known_start_fraction": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage",
+        "capture_dropped",
+        "late_packets",
+        "state_evictions"
+      ],
+      "properties": {
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "gap"
+          ]
+        },
+        "capture_dropped": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "late_packets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state_evictions": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "tcpConnectionAges": {
+      "required": [
+        "tcp_age_mean_seconds",
+        "tcp_age_max_seconds",
+        "tcp_closed_duration_mean_seconds",
+        "tcp_closed_duration_max_seconds",
+        "tcp_age_known_start_fraction"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "feature_set_version": {
+            "const": "traffic-v2"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "features": {
+            "$ref": "#/$defs/tcpConnectionAges"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "features": {
+            "maxProperties": 16
+          }
+        }
+      }
+    }
+  ]
+}

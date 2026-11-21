@@ -1,0 +1,18 @@
+# Inputs for the sensor and laboratory images.
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!contracts/
+!contracts/**
+!internal/
+!internal/**
+!migrations/
+!migrations/**
+!tests/
+!tests/fixtures/
+!tests/fixtures/**
+!lab/
+!lab/client.py
+!lab/target.py

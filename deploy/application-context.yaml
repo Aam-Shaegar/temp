@@ -1,0 +1,12 @@
+services:
+  sensor:
+    group_add: ["${NETWATCH_APPLICATION_CONTEXT_GID:-0}"]
+    environment:
+      NETWATCH_APPLICATION_CONTEXT_PATH: /run/netwatch/application-context
+    volumes:
+      - type: bind
+        source: ${NETWATCH_APPLICATION_CONTEXT_DIR:?Set the service aggregate directory}
+        target: /run/netwatch/application-context
+        read_only: true
+        bind:
+          create_host_path: false

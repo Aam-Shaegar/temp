@@ -1,0 +1,260 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"netwatch.local/netwatch/internal/incidents"
+)
+
+// Project advances a bounded prefix of one stream. A row lock serializes workers.
+// An earlier admitted job without a prediction blocks only its own stream.
+type incidentStreamState struct {
+	incidents.State
+	HTTP *incidents.State `json:"http,omitempty"`
+}
+
+type projectedPoint struct {
+	incidents.Point
+	http *string
+}
+
+func (s *Store) Project(ctx context.Context) (bool, error) {
+	return s.ProjectWithGap(ctx, 0)
+}
+
+// ProjectWithGap advances past a stalled input as unknown after the configured wait.
+func (s *Store) ProjectWithGap(ctx context.Context, gap time.Duration) (bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.Background())
+	var sid int64
+	var policy string
+	var raw []byte
+	err = tx.QueryRow(ctx, `SELECT s.stream_id,s.state,s.policy_version FROM incident_streams s JOIN LATERAL
+ (SELECT event_id,model_id,policy_version,start_ns FROM incident_queue WHERE stream_id=s.stream_id ORDER BY start_ns,event_id LIMIT 1) q ON true
+ JOIN feature_windows w ON w.event_id=q.event_id
+ LEFT JOIN predictions p ON (p.event_id,p.model_id,p.policy_version)=(q.event_id,q.model_id,q.policy_version)
+ WHERE p.event_id IS NOT NULL OR ($1::bigint>0 AND w.received_at<=clock_timestamp()-($1*interval '1 millisecond'))
+ ORDER BY q.start_ns,s.stream_id FOR UPDATE OF s SKIP LOCKED LIMIT 1`, gap.Milliseconds()).Scan(&sid, &raw, &policy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var state incidentStreamState
+	if err = json.Unmarshal(raw, &state); err != nil {
+		return false, err
+	}
+	rows, err := tx.Query(ctx, `SELECT q.event_id,q.start_ns,w.window_end_ns,CASE WHEN p.payload IS NOT NULL AND (q.model_id LIKE 'gru-%' OR p.payload->'observational' = 'true'::jsonb)
+ THEN 'degraded'
+ WHEN p.event_id IS NULL AND $2::bigint>0 AND w.received_at<=clock_timestamp()-($2*interval '1 millisecond') THEN 'projection_gap'
+ ELSE p.payload->>'status' END,(p.payload->>'score')::float8,(p.payload->>'threshold')::float8, p.payload#>>'{http,status}'
+ FROM incident_queue q JOIN feature_windows w USING(event_id) LEFT JOIN predictions p USING(event_id,model_id,policy_version)
+ WHERE stream_id=$1 ORDER BY q.start_ns,q.event_id LIMIT 128`, sid, gap.Milliseconds())
+	if err != nil {
+		return false, err
+	}
+	var points []projectedPoint
+	for rows.Next() {
+		var p projectedPoint
+		var status *string
+		if err = rows.Scan(&p.ID, &p.Start, &p.End, &status, &p.Score, &p.Threshold, &p.http); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if status == nil {
+			break
+		}
+		p.Status = *status
+		points = append(points, p)
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return false, rows.Err()
+	}
+	channel := "combined"
+	if policy == incidents.EvidencePolicy {
+		channel = "network"
+		if state.HTTP == nil {
+			state.HTTP = new(incidents.State)
+		}
+	}
+	for _, input := range points {
+		p := input.Point
+		if err = applyIncidentPoint(ctx, tx, sid, policy, channel, &state.State, p); err != nil {
+			return false, err
+		}
+		if state.HTTP != nil && policy == incidents.EvidencePolicy {
+			http := p.HTTPPoint(input.http)
+			if err = applyIncidentPoint(ctx, tx, sid, policy, "http", state.HTTP, http); err != nil {
+				return false, err
+			}
+		}
+		if _, err = tx.Exec(ctx, "DELETE FROM incident_queue WHERE stream_id=$1 AND event_id=$2", sid, p.ID); err != nil {
+			return false, err
+		}
+	}
+	raw, err = json.Marshal(state)
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, "UPDATE incident_streams SET state=$2 WHERE stream_id=$1", sid, raw); err != nil {
+		return false, err
+	}
+	return len(points) > 0, tx.Commit(ctx)
+}
+
+func applyIncidentPoint(ctx context.Context, tx pgx.Tx, sid int64, policy, channel string, state *incidents.State, p incidents.Point) (err error) {
+	link := func(id int64, event, kind string) error {
+		_, e := tx.Exec(ctx, "INSERT INTO incident_events VALUES($1,$2,$3)", id, event, kind)
+		return e
+	}
+	if p.Status == "projection_gap" {
+		state.Missing++
+	}
+	c := state.ObserveWithPolicy(p, policy)
+	if c.Kind == "opened" {
+		var first, lastSignal int64
+		for _, v := range c.Open {
+			if v.Signal() {
+				if lastSignal == 0 {
+					first = v.Start
+				}
+				lastSignal = v.End
+			}
+		}
+		err = tx.QueryRow(ctx, `INSERT INTO incidents(stream_id,first_ns,detected_ns,last_ns,last_signal_end_ns,evidence_channel) VALUES($1,$2,$3,$3,$4,$5) RETURNING id`, sid, first, p.End, lastSignal, channel).Scan(&state.Active)
+		if err != nil {
+			return err
+		}
+		for _, v := range c.Open {
+			kind := "observed"
+			if v.Signal() {
+				kind = "signal"
+			}
+			if v.ID == p.ID {
+				kind = "opened"
+			}
+			if err = link(state.Active, v.ID, kind); err != nil {
+				return err
+			}
+		}
+	} else if c.Kind == "interrupted" {
+		if c.LinkWindow {
+			kind := "unknown"
+			if p.Status == "projection_gap" {
+				kind = "gap"
+			}
+			if err = link(state.Active, p.ID, kind); err != nil {
+				return err
+			}
+		}
+		if _, err = tx.Exec(ctx, `UPDATE incidents SET interrupted_ns=$2,
+ last_ns=GREATEST(last_ns,$2) WHERE id=$1`, state.Active, c.InterruptedAt); err != nil {
+			return err
+		}
+		state.Active = 0
+	} else if c.Kind != "" {
+		kind := c.Kind
+		if p.Status == "projection_gap" {
+			kind = "gap"
+		}
+		if err = link(state.Active, p.ID, kind); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE incidents SET last_ns=$2,
+ closed_ns=CASE WHEN $3 THEN $2::bigint ELSE NULL END,
+ closed_at=CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,
+ last_signal_end_ns=CASE WHEN $4 THEN $2::bigint ELSE last_signal_end_ns END
+ WHERE id=$1`, state.Active, p.End, c.Kind == "closed", c.Kind == "signal")
+		if err != nil {
+			return err
+		}
+		if c.Kind == "closed" {
+			state.Active = 0
+		}
+	}
+
+	return nil
+}
+
+type IncidentFilter struct {
+	Entity, Model       string
+	From, Until, Before int64
+}
+
+const incidentFields = `jsonb_build_object('id',i.id::text,'sensor',s.sensor_id,'epoch',s.epoch,'entity',s.entity_id,
+ 'entity_type',s.entity_type,'model',s.model_id,'policy',s.policy_version,'evidence_channel',i.evidence_channel,'first_ns',i.first_ns::text,
+ 'detected_ns',i.detected_ns::text,'detected_at',i.detected_at,'last_ns',i.last_ns::text,'closed_ns',i.closed_ns::text,
+ 'estimated_end_ns',CASE WHEN i.closed_ns IS NOT NULL THEN i.last_signal_end_ns::text END, 'closed_at',i.closed_at,
+ 'interrupted_ns',i.interrupted_ns::text,
+ 'ack_at',i.ack_at,'ack_by',i.ack_by)`
+
+func (s *Store) IncidentList(ctx context.Context, f IncidentFilter) ([]json.RawMessage, error) {
+	rows, err := s.Pool.Query(ctx, "SELECT "+incidentFields+` FROM incidents i JOIN incident_streams s USING(stream_id)
+ WHERE ($1='' OR s.entity_id=$1) AND ($2='' OR s.model_id=$2) AND i.detected_ns >= $3
+ AND ($4::bigint=0 OR i.detected_ns<$4) AND ($5::bigint=0 OR i.id<$5) ORDER BY i.id DESC LIMIT 51`, f.Entity, f.Model, f.From, f.Until, f.Before)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[json.RawMessage])
+}
+
+// JournalStatus reports pipeline-wide work, independently of the incident filters.
+func (s *Store) JournalStatus(ctx context.Context) (pending, retrying bool, err error) {
+	err = s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT FROM incident_queue),
+ EXISTS(SELECT FROM inference_jobs WHERE status <> 'done' AND last_error IS NOT NULL AND last_error <> '')`).Scan(&pending, &retrying)
+	return
+}
+
+func (s *Store) Incident(ctx context.Context, id, after int64) (map[string]any, error) {
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.Background())
+	var header json.RawMessage
+	var version, policy string
+	if err = tx.QueryRow(ctx, "SELECT "+incidentFields+`, s.policy_version, (
+ SELECT w.payload->>'feature_set_version' FROM incident_events e JOIN feature_windows w USING(event_id)
+ WHERE e.incident_id=i.id AND w.window_start_ns=i.first_ns LIMIT 1
+) FROM incidents i JOIN incident_streams s USING(stream_id) WHERE i.id=$1`, id).Scan(&header, &policy, &version); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT jsonb_build_object('event',w.event_id,'kind',e.kind,'start_ns',w.window_start_ns::text,
+ 'end_ns',w.window_end_ns::text,'features',w.payload->'features','quality',w.payload->'quality',
+ 'application',w.payload->'application','prediction',
+ CASE WHEN e.kind='gap' OR p.payload IS NULL THEN jsonb_build_object(
+ 'schema_version',1,'event_id',e.event_id,'model_id',s.model_id,'feature_set_version',w.payload->>'feature_set_version',
+ 'status','degraded','unavailable_reason','prediction_timeout','score',NULL,'threshold',NULL)
+ ELSE p.payload END)
+ FROM incidents i JOIN incident_streams s USING(stream_id) JOIN incident_events e ON e.incident_id=i.id
+ JOIN feature_windows w USING(event_id) LEFT JOIN predictions p ON p.event_id=e.event_id AND p.model_id=s.model_id AND p.policy_version=s.policy_version
+ WHERE i.id=$1 AND w.window_start_ns>$2 ORDER BY w.window_start_ns LIMIT 201`, id, after)
+	if err != nil {
+		return nil, err
+	}
+	events, err := pgx.CollectRows(rows, pgx.RowTo[json.RawMessage])
+	if err != nil {
+		return nil, err
+	}
+	more := len(events) > 200
+	if more {
+		events = events[:200]
+	}
+	return map[string]any{"schema_version": 1, "feature_set_version": version, "rule": incidents.Rule(policy), "incident": header, "events": events, "more": more}, tx.Commit(ctx)
+}
+func (s *Store) AckIncident(ctx context.Context, id int64, actor string) error {
+	tag, err := s.Pool.Exec(ctx, `UPDATE incidents SET ack_by=COALESCE(ack_by,$2),ack_at=COALESCE(ack_at,clock_timestamp()) WHERE id=$1`, id, actor)
+	if err == nil && tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return err
+}

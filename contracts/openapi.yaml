@@ -1,0 +1,308 @@
+openapi: 3.1.0
+info:
+  title: NetWatch ingestion and incident API
+  version: 0.4.0
+paths:
+  /health/live:
+    get:
+      responses:
+        '200': {description: Process is alive}
+  /health/ready:
+    get:
+      responses:
+        '200': {description: Ingestion database and schema ready; ML readiness is separate}
+        '503': {description: Database or schema unavailable}
+  /v1/security/assess:
+    post:
+      summary: Assess a minute and persist its evidence before acknowledging
+      security: [{sensorToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './security-observation.schema.json'}
+      responses:
+        '200':
+          description: Stored observation receipt
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, assessment]
+                properties:
+                  id: {type: string}
+                  assessment: {$ref: './security-assessment.schema.json'}
+        '401': {description: Invalid sensor credentials}
+        '413': {description: Request exceeds 64 KiB}
+        '422': {description: Invalid observation}
+        '502': {description: Invalid response from classifier}
+        '503': {description: Classification or storage unavailable}
+  /v1/security/observations:
+    post:
+      summary: Commit a minute observation and queue background assessment
+      security: [{sensorToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './security-observation.schema.json'}
+      responses:
+        '202':
+          description: Durable job receipt; equal submissions return the same job ID
+          headers:
+            Location: {schema: {type: string}}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job_id]
+                properties:
+                  job_id: {type: string}
+        '401': {description: Invalid sensor credentials}
+        '413': {description: Request exceeds 64 KiB}
+        '422': {description: Invalid observation}
+        '503': {description: Storage unavailable}
+    get:
+      summary: Review observations and findings in descending receipt order
+      security: [{operatorToken: []}]
+      parameters:
+        - {in: query, name: before, schema: {type: integer, minimum: 0}}
+        - {in: query, name: entity, schema: {type: string}}
+      responses:
+        '200': {description: Up to 50 observations with evidence and next page cursor}
+        '400': {description: Invalid cursor}
+        '401': {description: Invalid operator credentials}
+        '503': {description: Storage unavailable}
+  /v1/security/observations/{job_id}:
+    get:
+      summary: Read the status of a job owned by the calling sensor
+      security: [{sensorToken: []}]
+      parameters:
+        - {in: path, name: job_id, required: true, schema: {type: string}}
+      responses:
+        '200': {description: Job state and optional assessment and observation ID}
+        '401': {description: Invalid sensor credentials}
+        '404': {description: Job absent or outside the sensor's scope}
+        '503': {description: Storage unavailable}
+  /v1/windows:
+    post:
+      summary: Atomic window delivery contract
+      description: >-
+        Receiver authenticates the sensor and validates all windows before storage.
+        A 200 ACK follows durable commit of all new events and inference jobs. Duplicate event IDs with
+        identical content are successful; conflicting content is a 409 error.
+        Maximum request body is 2 MiB; batch has at most 100 windows.
+      security: [{sensorToken: []}]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: {type: string, pattern: '^[0-9a-f]{64}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './batch.schema.json'}
+      responses:
+        '200':
+          description: All event IDs durably committed, including identical duplicates
+          content:
+            application/json:
+              schema: {$ref: './ack.schema.json'}
+        '400': {description: Invalid envelope; nothing committed}
+        '401': {description: Invalid or missing sensor token; nothing committed}
+        '403': {description: Sensor not authorized; nothing committed}
+        '409': {description: Existing event ID has conflicting content; nothing committed}
+        '413': {description: Request too large; nothing committed}
+        '415': {description: Content-Type must be application/json}
+        '422':
+          description: Atomic rejection; zero-based error_index identifies an invalid window; nothing committed
+          content:
+            application/json:
+              schema: {$ref: './rejection.schema.json'}
+        '429': {description: Retry after backoff; no acknowledgment}
+        '503': {description: Temporarily unavailable; no acknowledgment}
+  /v1/windows/{event_id}:
+    get:
+      security: [{sensorToken: []}]
+      parameters:
+        - {in: path, name: event_id, required: true, schema: {type: string, maxLength: 200}}
+      responses:
+        '200':
+          description: Stored window in the authenticated sensor scope
+          content:
+            application/json:
+              schema: {$ref: './window.schema.json'}
+        '401': {description: Invalid sensor token}
+        '404': {description: Window absent or belongs to another sensor}
+        '503': {description: Storage unavailable}
+  /v1/predictions/{event_id}:
+    get:
+      security: [{sensorToken: []}]
+      parameters:
+        - {in: path, name: event_id, required: true, schema: {type: string, maxLength: 200}}
+      responses:
+        '200':
+          description: At most 100 stored predictions with policy_version and processed_at; empty while pending or out of scope
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [predictions]
+                properties:
+                  predictions:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      required: [prediction, policy_version, processed_at]
+                      properties:
+                        prediction: {$ref: './prediction.schema.json'}
+                        policy_version: {type: string}
+                        processed_at: {type: string, format: date-time}
+        '401': {description: Invalid sensor token}
+        '503': {description: Storage unavailable}
+  /v1/pipeline/status:
+    get:
+      summary: Inspect capture freshness, active detector output and durable queues
+      security: [{operatorToken: []}]
+      responses:
+        '200':
+          description: Operational snapshot with event and receipt times separated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observed_at, target, capture, prediction, usable_prediction, inference, assessment, projection_pending, projection_oldest_age_s, projection_gaps]
+                properties:
+                  observed_at: {type: string, format: date-time}
+                  target:
+                    type: object
+                    required: [model_id, policy_version]
+                    properties:
+                      model_id: {type: string}
+                      policy_version: {type: string}
+                  capture:
+                    type: [object, 'null']
+                    description: Most recently received window and its recorded capture quality
+                  prediction:
+                    type: [object, 'null']
+                    description: Most recent prediction for the active model and policy, including abstention
+                  usable_prediction:
+                    type: [object, 'null']
+                    description: Latest normal or anomalous prediction and the age of its source event
+                  inference: {type: object}
+                  assessment: {type: object}
+                  projection_pending: {type: integer, minimum: 0}
+                  projection_oldest_age_s: {type: [number, 'null']}
+                  projection_gaps: {type: integer, minimum: 0}
+        '401': {description: Invalid operator credentials}
+        '503': {description: Storage unavailable}
+  /v1/incidents:
+    get:
+      summary: List incidents in descending ID order
+      security: [{operatorToken: []}]
+      parameters:
+        - {in: query, name: entity, schema: {type: string, maxLength: 800}}
+        - {in: query, name: model, schema: {type: string, maxLength: 200}}
+        - {in: query, name: from, description: Inclusive detection time in epoch nanoseconds, schema: {type: integer, minimum: 0}}
+        - {in: query, name: until, description: Exclusive detection time in epoch nanoseconds (zero disables bound), schema: {type: integer, minimum: 0}}
+        - {in: query, name: before, description: Exclusive incident ID cursor, schema: {type: integer, minimum: 0}}
+      responses:
+        '200':
+          description: Page and pipeline-wide pending and retry indicators
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [incidents, next, pending, retrying]
+                properties:
+                  incidents: {type: array, maxItems: 50, items: {$ref: '#/components/schemas/Incident'}}
+                  next: {type: string, description: Empty on last page}
+                  pending: {type: boolean}
+                  retrying: {type: boolean}
+                  failed: {type: boolean, description: A terminal inference error was recorded}
+        '400': {description: Invalid filter or cursor}
+        '401': {description: Operator credentials required}
+        '503': {description: Storage unavailable}
+  /v1/incidents/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/incidentID'}
+    get:
+      security: [{operatorToken: []}]
+      parameters:
+        - {in: query, name: after, description: Exclusive start_ns of previous evidence page, schema: {type: integer, minimum: 0}}
+      responses:
+        '200':
+          description: Chronological evidence and incident metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema_version, feature_set_version, rule, incident, events, more]
+                properties:
+                  schema_version: {const: 1}
+                  feature_set_version: {enum: [traffic-v1, traffic-v2]}
+                  rule: {type: string}
+                  incident: {$ref: '#/components/schemas/Incident'}
+                  events:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [event, kind, start_ns, end_ns, features, quality, prediction]
+                      properties:
+                        event: {type: string}
+                        kind: {enum: [opened, signal, observed, unknown, closed]}
+                        start_ns: {type: string}
+                        end_ns: {type: string}
+                        features: {type: object}
+                        quality: {type: object}
+                        prediction: {$ref: './prediction.schema.json'}
+                  more: {type: boolean}
+        '400': {description: Invalid ID or cursor}
+        '401': {description: Operator credentials required}
+        '404': {description: Incident absent}
+        '503': {description: Storage unavailable}
+  /v1/incidents/{id}/ack:
+    parameters:
+      - {$ref: '#/components/parameters/incidentID'}
+    post:
+      security: [{operatorToken: []}]
+      summary: Record first acknowledgement using authenticated actor
+      responses:
+        '204': {description: Acknowledgement durably recorded or previously present}
+        '400': {description: Invalid ID}
+        '401': {description: Operator credentials required}
+        '404': {description: Incident absent}
+        '503': {description: Storage unavailable}
+components:
+  parameters:
+    incidentID: {in: path, name: id, required: true, schema: {type: integer, minimum: 1}}
+  schemas:
+    Incident:
+      type: object
+      required: [id, sensor, epoch, entity_type, entity, model, policy, first_ns, detected_ns, detected_at, last_ns, closed_ns, ack_at, ack_by]
+      properties:
+        id: {type: string}
+        sensor: {type: string}
+        epoch: {type: string}
+        entity_type: {type: string}
+        entity: {type: string}
+        model: {type: string}
+        policy: {type: string}
+        first_ns: {type: string}
+        detected_ns: {type: string}
+        detected_at: {type: string, format: date-time}
+        last_ns: {type: string}
+        closed_ns: {type: [string, 'null']}
+        estimated_end_ns: {type: [string, 'null']}
+        interrupted_ns: {type: [string, 'null']}
+        closed_at: {type: [string, 'null'], format: date-time}
+        ack_at: {type: [string, 'null'], format: date-time}
+        ack_by: {type: [string, 'null']}
+  securitySchemes:
+    operatorToken: {type: http, scheme: bearer}
+    sensorToken:
+      type: http
+      scheme: bearer

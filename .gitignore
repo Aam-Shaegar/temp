@@ -1,0 +1,45 @@
+__pycache__/
+*.py[cod]
+.venv/
+**/.venv/
+node_modules/
+web/dist/
+.env
+.env.*
+!.env.example
+outputs/
+data/raw/
+data/processed/
+data/runs/
+artifacts/
+.cache/
+coverage/
+bin/
+*.egg-info/
+*.pcap
+*.pcapng
+!tests/fixtures/pcap/*.pcap
+!tests/fixtures/pcap/*.pcapng
+.DS_Store
+.tools/
+
+# Local coursework materials and historical notes
+local-coursework/
+docs/artifact.md
+docs/archive/
+
+# Local development notes
+AGENTS.md
+/PLAN.md
+/docs/IMPLEMENTATION_GUIDE.md
+/docs/status.md
+/docs/runbooks/release-checklist.md
+PROJECT_MEMORY.md
+NetWatch-чек-лист.md
+NetWatch-построчный-разбор.md
+
+# Durable sensor state (windows and local health metadata)
+/data/spool/
+*.seg
+
+/data/holdout/

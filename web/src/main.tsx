@@ -1,0 +1,509 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { createRoot } from "react-dom/client";
+import "./style.css";
+import { Observations } from "./Observations";
+
+type Incident = {
+  id: string;
+  sensor: string;
+  entity: string;
+  epoch: string;
+  model: string;
+  policy: string;
+  evidence_channel?: "combined" | "network" | "http";
+  first_ns: string;
+  detected_ns: string;
+  last_ns: string;
+  closed_ns: string | null;
+  interrupted_ns?: string | null;
+  estimated_end_ns?: string | null;
+  ack_by: string | null;
+  ack_at: string | null;
+};
+type Evidence = {
+  event: string;
+  kind: string;
+  start_ns: string;
+  end_ns: string;
+  features: { in_packets: number | null; out_packets: number | null };
+  prediction: {
+    status: string;
+    score: number | null;
+    threshold: number | null;
+    unavailable_reason?: string;
+    http?: { status: "normal" | "anomalous" | "unavailable"; reason: string };
+    diagnostics?: {
+      forest_score: number;
+      forest_threshold: number;
+      pattern_label?: string;
+      pattern_ratio?: number;
+    };
+    classification?: {
+      label: string;
+      probability: number | null;
+      version: string;
+    };
+  };
+};
+type Detail = {
+  schema_version: number;
+  feature_set_version: string;
+  rule: string;
+  incident: Incident;
+  events: Evidence[];
+  more: boolean;
+};
+const when = (ns: string) =>
+  new Date(Number(BigInt(ns) / 1000000n)).toLocaleString("ru-RU", {
+    timeZone: "UTC",
+  });
+const fmt = (v: number | null) => (v == null ? "—" : v.toFixed(4));
+const kinds: Record<string, string> = {
+  opened: "Открытие",
+  closed: "Закрытие",
+  signal: "Превышение",
+  unknown: "Нет оценки",
+  gap: "Истекло ожидание оценки",
+  observed: "Наблюдение",
+};
+
+const unavailableReasons: Record<string, string> = {
+  feature_set_mismatch: "Другая версия признаков",
+  outside_model_scope: "Сервис вне профиля модели",
+  capture_loss: "Потери при наблюдении",
+  incomplete_coverage: "Неполное наблюдение",
+  unverified_capture_quality: "Потери захвата неизвестны",
+  prediction_timeout: "Оценка не поступила вовремя",
+  application_context_missing: "Прикладная телеметрия недоступна",
+  regime_uncalibrated: "Режим нагрузки не откалиброван",
+};
+
+const labels: Record<string, string> = {
+  benign: "Штатный трафик",
+  large_upload: "Рост входящих байтов на поток",
+  large_response: "Рост исходящих байтов на поток",
+  connection_surge: "Всплеск новых TCP-соединений",
+  persistent_exchange: "Активный обмен в одном длительном соединении",
+  foreground_pause: "Пауза основных запросов",
+  unknown: "Неизвестный тип",
+  insufficient_data: "Недостаточно данных",
+};
+
+const httpEvidence: Record<string, string> = {
+  within_limits: "HTTP в пределах нормы",
+  error_fraction: "Доля HTTP-ошибок",
+  latency: "Задержка HTTP",
+  errors_and_latency: "Ошибки и задержка HTTP",
+  missing_telemetry: "Телеметрия HTTP недоступна",
+  insufficient_requests: "Недостаточно HTTP-запросов",
+  unconfigured: "Правило HTTP не настроено",
+};
+
+function EvidenceTable({ events, channel }: { events: Evidence[]; channel?: Incident["evidence_channel"] }) {
+  const total = ({ features }: Evidence) =>
+    features.in_packets === null || features.out_packets === null
+      ? null
+      : features.in_packets + features.out_packets;
+  const max = events.reduce((m, event) => Math.max(m, total(event) ?? 0), 1);
+  return (
+    <table>
+      <caption>Трафик по окнам · время UTC</caption>
+      <thead>
+        <tr>
+          <th>Начало</th>
+          <th>Пакеты, вход / выход</th>
+          <th>{channel === "http" ? "Свидетельство HTTP" : "Оценка / порог"}</th>
+          <th>Событие</th>
+          <th>Тип окна и оценка модели</th>
+        </tr>
+      </thead>
+      <tbody>
+        {events.map((e) => (
+          <tr key={e.event}>
+            <td>{when(e.start_ns)}</td>
+            <td>
+              {e.features.in_packets ?? "—"} / {e.features.out_packets ?? "—"}
+              {total(e) !== null && (
+                <meter
+                  aria-label="Всего пакетов"
+                  min="0"
+                  max={max}
+                  value={total(e)!}
+                />
+              )}
+            </td>
+            <td>
+              {channel === "http" ? httpEvidence[e.prediction.http?.reason ?? ""] ?? "—" :
+                <>{fmt(e.prediction.score)} / {fmt(e.prediction.threshold)}</>}
+              {channel !== "http" && e.prediction.diagnostics && (
+                <small>
+                  <br />
+                  Лес {fmt(e.prediction.diagnostics.forest_score)} /{" "}
+                  {fmt(e.prediction.diagnostics.forest_threshold)}
+                  {e.prediction.diagnostics.pattern_ratio != null &&
+                    " · правило ×" +
+                      fmt(e.prediction.diagnostics.pattern_ratio)}
+                </small>
+              )}
+            </td>
+            <td>{kinds[e.kind]}</td>
+            <td>
+              {e.prediction.classification ? (
+                <>
+                  {labels[e.prediction.classification.label] ??
+                    "Неизвестный тип"}
+                  {e.prediction.classification.probability !== null &&
+                    " · " +
+                      e.prediction.classification.probability.toLocaleString(
+                        "ru-RU",
+                        { maximumFractionDigits: 3 },
+                      )}
+                  <br />
+                  <small>{e.prediction.classification.version}</small>
+                </>
+              ) : (
+                unavailableReasons[e.prediction.unavailable_reason ?? ""] ?? "—"
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function App() {
+  const [token, setToken] = useState(""),
+    [filter, setFilter] = useState(""),
+    [cursor, setCursor] = useState(""),
+    [next, setNext] = useState(""),
+    [rev, refresh] = useState(0);
+  const [items, setItems] = useState<Incident[]>([]),
+    [selected, select] = useState(""),
+    [card, setCard] = useState<Detail | null>(null);
+  const [listError, setListError] = useState(""),
+    [cardError, setCardError] = useState(""),
+    [busy, setBusy] = useState(false),
+    [acting, setActing] = useState(false);
+  const [pipeline, setPipeline] = useState({
+    pending: false,
+    retrying: false,
+    failed: false,
+  });
+  const action = useRef<AbortController | null>(null);
+  const request = async (path: string, signal: AbortSignal, method = "GET") => {
+    const res = await fetch(path, {
+      method,
+      headers: { Authorization: "Bearer " + token },
+      signal,
+    });
+    if (!res.ok)
+      throw Error(
+        res.status === 401
+          ? "Требуется действующий ключ оператора."
+          : "Сервер недоступен или запись не найдена.",
+      );
+    return res;
+  };
+  useEffect(() => {
+    if (!token) return;
+    const ac = new AbortController();
+    setBusy(true);
+    setListError("");
+    setItems([]);
+    setNext("");
+    const query = new URLSearchParams(filter);
+    if (cursor) query.set("before", cursor);
+    request("/v1/incidents?" + query, ac.signal)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!ac.signal.aborted) {
+          setItems(d.incidents);
+          setNext(d.next);
+          setPipeline({
+            pending: d.pending,
+            retrying: d.retrying,
+            failed: d.failed,
+          });
+        }
+      })
+      .catch((e) => {
+        if (!ac.signal.aborted) setListError(e.message);
+      })
+      .finally(() => {
+        if (!ac.signal.aborted) setBusy(false);
+      });
+    return () => ac.abort();
+  }, [token, filter, cursor, rev]);
+  useEffect(() => {
+    const ac = new AbortController();
+    setCard(null);
+    setCardError("");
+    setActing(false);
+    if (selected && token)
+      request("/v1/incidents/" + selected, ac.signal)
+        .then((r) => r.json())
+        .then((d) => {
+          if (!ac.signal.aborted) setCard(d);
+        })
+        .catch((e) => {
+          if (!ac.signal.aborted) setCardError(e.message);
+        });
+    return () => {
+      ac.abort();
+      action.current?.abort();
+    };
+  }, [token, selected, rev]);
+  function apply(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const data = new FormData(e.currentTarget),
+      q = new URLSearchParams();
+    for (const key of ["entity", "model", "from", "until"]) {
+      const v = String(data.get(key) || "");
+      if (v)
+        q.set(
+          key,
+          key === "from" || key === "until"
+            ? String(BigInt(Date.parse(v + "Z")) * 1000000n)
+            : v,
+        );
+    }
+    setFilter(q.toString());
+    setCursor("");
+    select("");
+    refresh((i) => i + 1);
+  }
+  async function operate(mode: "ack" | "more" | "export") {
+    if (!card || acting) return;
+    action.current?.abort();
+    const ac = new AbortController();
+    action.current = ac;
+    setActing(true);
+    setCardError("");
+    try {
+      const url = "/v1/incidents/" + card.incident.id;
+      if (mode === "ack") {
+        await request(url + "/ack", ac.signal, "POST");
+        refresh((i) => i + 1);
+        return;
+      }
+      let data = card;
+      let events = [...data.events];
+      while (data.more) {
+        const after = events[events.length - 1].start_ns;
+        data = await (await request(url + "?after=" + after, ac.signal)).json();
+        events = events.concat(data.events);
+        if (mode === "more") break;
+      }
+      if (ac.signal.aborted) return;
+      if (mode === "more") {
+        setCard({ ...data, events });
+        return;
+      }
+      const blob = new Blob(
+        [
+          JSON.stringify(
+            { ...data, events, exported_at: new Date().toISOString() },
+            null,
+            2,
+          ),
+        ],
+        { type: "application/json" },
+      );
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "netwatch-incident-" + card.incident.id + ".json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    } catch (e) {
+      if (!ac.signal.aborted) setCardError(String(e));
+    } finally {
+      if (!ac.signal.aborted) setActing(false);
+    }
+  }
+  return (
+    <main>
+      <header>
+        <strong>NetWatch</strong>
+        <span>Мониторинг сети</span>
+      </header>
+      <h1>Журнал инцидентов</h1>
+      {!token ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            setToken(String(new FormData(e.currentTarget).get("token")));
+          }}
+        >
+          <label>
+            Ключ оператора
+            <input required type="password" name="token" autoComplete="off" />
+          </label>
+          <button>Открыть журнал</button>
+        </form>
+      ) : (
+        <>
+          <form onSubmit={apply}>
+            <label>
+              Объект
+              <input name="entity" />
+            </label>
+            <label>
+              Версия модели
+              <input name="model" />
+            </label>
+            <label>
+              С (UTC)
+              <input type="datetime-local" name="from" />
+            </label>
+            <label>
+              До (UTC)
+              <input type="datetime-local" name="until" />
+            </label>
+            <button>Применить</button>
+          </form>
+          <nav>
+            <button onClick={() => refresh((i) => i + 1)}>Обновить</button>
+            <button
+              onClick={() => {
+                setToken("");
+                select("");
+                setCursor("");
+                setFilter("");
+              }}
+            >
+              Выйти
+            </button>
+          </nav>
+          {!busy && !listError && pipeline.failed && (
+            <p role="status">
+              Есть окна без оценки из-за несовместимой модели или неверного
+              запроса.
+            </p>
+          )}
+          {!busy && !listError && pipeline.pending && (
+            <p role="status">
+              {pipeline.retrying
+                ? "Обработка задержана. В очереди есть задания для повторной попытки."
+                : "В очереди есть окна, которые ещё не обработаны."}
+            </p>
+          )}
+          <section aria-label="Список инцидентов" aria-busy={busy}>
+            {busy ? (
+              <p role="status">Загрузка…</p>
+            ) : listError ? (
+              <p role="alert">{listError}</p>
+            ) : items.length === 0 ? (
+              <p role="status">Инцидентов по этому запросу нет.</p>
+            ) : (
+              <ul>
+                {items.map((i) => (
+                  <li key={i.id}>
+                    <button
+                      aria-pressed={selected === i.id}
+                      onClick={() => select(i.id)}
+                    >
+                      Инцидент №{i.id} · {i.entity}
+                    </button>{" "}
+                    <span>
+                      {i.interrupted_ns ? "Наблюдение прервано" : i.closed_ns ? "Закрыт" : "Открыт"} ·{" "}
+                      {when(i.detected_ns)} UTC
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {next && (
+              <button
+                onClick={() => {
+                  select("");
+                  setCursor(next);
+                }}
+              >
+                Следующая страница
+              </button>
+            )}
+            {cursor && (
+              <button
+                onClick={() => {
+                  select("");
+                  setCursor("");
+                }}
+              >
+                К началу
+              </button>
+            )}
+          </section>
+          <Observations
+            key={filter}
+            token={token}
+            entity={new URLSearchParams(filter).get("entity") || ""}
+            revision={rev}
+          />
+          {cardError && <p role="alert">{cardError}</p>}
+          {selected && !card && !cardError && (
+            <p role="status">Загрузка карточки…</p>
+          )}
+          {card && (
+            <section aria-label="Карточка инцидента">
+              <h2>Инцидент №{card.incident.id}</h2>
+              <p>
+                {card.incident.policy === "v3" || card.incident.policy === "v4"
+                  ? "Для подтверждения нужны сигналы в двух смежных окнах."
+                  : "Для подтверждения нужны как минимум два сигнала за три окна."}
+              </p>
+              <dl>
+                {Object.entries({
+                  Объект: card.incident.entity,
+                  Сенсор: card.incident.sensor,
+                  Модель: card.incident.model,
+                  Политика: card.incident.policy,
+                  ...(card.incident.evidence_channel && card.incident.evidence_channel !== "combined" && {
+                    Источник: card.incident.evidence_channel === "http" ? "Прокси HTTP" : "Сетевой детектор",
+                  }),
+                  "Первый сигнал (UTC)": when(card.incident.first_ns),
+                  "Обнаружен (UTC)": when(card.incident.detected_ns),
+                  "Оценка конца аномалии (UTC)": card.incident.estimated_end_ns
+                    ? when(card.incident.estimated_end_ns)
+                    : "—",
+                  "Состояние": card.incident.interrupted_ns
+                    ? "Наблюдение прервано"
+                    : card.incident.closed_ns ? "Закрыт" : "Открыт",
+                  "Закрыт (UTC)": card.incident.closed_ns ? when(card.incident.closed_ns) : "—",
+                  ...(card.incident.interrupted_ns && {
+                    "Наблюдение прервано (UTC)": when(card.incident.interrupted_ns),
+                  }),
+                  Просмотр: card.incident.ack_by || "Ожидает подтверждения",
+                }).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+              <nav>
+                {!card.incident.ack_by && (
+                  <button disabled={acting} onClick={() => operate("ack")}>
+                    Подтвердить просмотр
+                  </button>
+                )}
+                <button disabled={acting} onClick={() => operate("export")}>
+                  Скачать JSON
+                </button>
+              </nav>
+              <div className="evidence">
+                <EvidenceTable events={card.events} channel={card.incident.evidence_channel} />
+              </div>
+              {card.more && (
+                <button disabled={acting} onClick={() => operate("more")}>
+                  Ещё окна
+                </button>
+              )}
+            </section>
+          )}
+        </>
+      )}
+    </main>
+  );
+}
+createRoot(document.getElementById("root")!).render(<App />);

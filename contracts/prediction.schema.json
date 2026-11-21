@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "model_id",
+    "feature_set_version",
+    "status",
+    "score",
+    "threshold"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "feature_set_version": {
+      "enum": ["traffic-v1", "traffic-v2"]
+    },
+    "status": {
+      "enum": [
+        "normal",
+        "anomalous",
+        "warming_up",
+        "insufficient_data",
+        "degraded",
+        "error"
+      ]
+    },
+    "score": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "threshold": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "reason": {"enum":["incompatible_model_or_policy","invalid_inference_request"]},
+    "unavailable_reason": {
+      "enum": ["feature_set_mismatch", "outside_model_scope", "capture_loss",
+               "incomplete_coverage", "unverified_capture_quality", "prediction_timeout", "application_context_missing",
+               "regime_uncalibrated"]
+    },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": {"enum": ["normal", "anomalous", "unavailable"]},
+        "reason": {"type": "string"}
+      },
+      "oneOf": [
+        {"properties": {"status": {"const": "normal"}, "reason": {"const": "within_limits"}}},
+        {"properties": {"status": {"const": "anomalous"}, "reason": {"enum": ["error_fraction", "latency", "errors_and_latency"]}}},
+        {"properties": {"status": {"const": "unavailable"}, "reason": {"enum": ["unconfigured", "missing_telemetry", "insufficient_requests"]}}}
+      ]
+    },
+    "observational": {"type": "boolean"},
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forest_score", "forest_threshold"],
+      "dependentRequired": {"pattern_label": ["pattern_ratio"], "pattern_ratio": ["pattern_label"]},
+      "properties": {
+        "forest_score": {"type": "number", "minimum": 0},
+        "forest_threshold": {"type": "number", "minimum": 0},
+        "pattern_label": {"enum": ["persistent_exchange", "large_upload", "large_response", "connection_surge"]},
+        "pattern_ratio": {"type": "number", "minimum": 0}
+      }
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "probability",
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^cls-[0-9a-f]{24}$"
+        },
+        "label": {
+          "enum": [
+            "benign",
+            "foreground_pause",
+            "unknown",
+            "insufficient_data",
+            "large_upload",
+            "large_response",
+            "connection_surge",
+            "persistent_exchange"
+          ]
+        },
+        "probability": {}
+      },
+      "if": {
+        "properties": {
+          "label": {
+            "enum": [
+              "unknown",
+              "insufficient_data",
+              "large_upload",
+              "large_response",
+              "connection_surge",
+              "persistent_exchange"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "probability": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "probability": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 1
+          }
+        }
+      }
+    }
+  },
+  "if": {"required": ["unavailable_reason"]},
+  "then": {"properties": {"status": {"enum": ["insufficient_data", "degraded"]}}}
+}

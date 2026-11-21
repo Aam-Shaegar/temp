@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ruleset",
+    "entity",
+    "start_s",
+    "interval_s",
+    "evaluated",
+    "findings",
+    "unassessed"
+  ],
+  "if": {
+    "properties": { "ruleset": { "const": "passive-v5" } }
+  },
+  "then": {
+    "required": ["availability", "scheduled_change"],
+    "properties": {
+      "findings": { "items": { "required": ["kind"] } }
+    }
+  },
+  "properties": {
+    "ruleset": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "entity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "start_s": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "interval_s": {
+      "const": 60
+    },
+    "evaluated": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "availability": {
+      "enum": ["reachable", "degraded", "unmeasured"]
+    },
+    "scheduled_change": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "label",
+          "basis",
+          "evidence"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": ["traffic_pattern", "degradation_pattern", "security_indicator", "waf_signal"]
+          },
+          "basis": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "unassessed": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

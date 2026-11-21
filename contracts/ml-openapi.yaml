@@ -1,0 +1,46 @@
+openapi: 3.1.0
+info:
+  title: NetWatch internal inference contract
+  version: 0.3.0
+paths:
+  /v1/predict:
+    post:
+      description: >-
+        Worker submits a versioned target and windows. FastAPI loads a pinned local model bundle and
+        scores complete windows in the supported traffic profile. For a GRU, histories maps each target event ID to up to twelve earlier windows in ascending event time. Missing or discontinuous history returns warming_up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './inference-request.schema.json'}
+      responses:
+        '200':
+          description: Validated model responses matching submitted identities
+          content:
+            application/json:
+              schema: {$ref: './inference-response.schema.json'}
+        '413': {description: Body exceeds 2 MiB}
+        '422': {description: Invalid contract or duplicate event ID}
+        '409': {description: Requested model or policy unavailable}
+        '503': {description: Validated model unavailable; job must remain retryable}
+  /health/live:
+    get:
+      responses:
+        '200': {description: Process alive}
+  /health/ready:
+    get:
+      responses:
+        '200': {description: Validated compatible model ready}
+        '503': {description: No validated model}
+  /v1/security/assess:
+    post:
+      description: Classify one minute of passive observations from a trusted source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: './security-observation.schema.json'}
+      responses:
+        '200': {description: Findings with evidence and a list of rules lacking measurements}
+        '413': {description: Body exceeds 64 KiB}
+        '422': {description: Invalid observation}
